@@ -1,0 +1,106 @@
+from ultralytics import YOLO
+import cv2
+import paho.mqtt.client as mqtt
+import json
+import time
+
+# ===================== 配置项 =====================
+# YOLO模型路径
+MODEL_PATH = r"E:\ultralytics-main\runs\detect\train5\weights\best.onnx"
+# MQTT配置
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+MQTT_TOPIC_RESULT = "yolo/detection_results"
+MQTT_TOPIC_IMAGE = "yolo/triggered_image"
+# 视频流优化配置
+TARGET_RESOLUTION = (640, 480)  # 降低分辨率
+JPEG_QUALITY = 40  # 压缩图片质量
+TARGET_FPS = 5  # 限制帧率
+CONF_THRESHOLD = 0.1  # 置信度
+
+# ===================== 初始化 =====================
+model = YOLO(MODEL_PATH)
+client = mqtt.Client()
+client.connect(MQTT_BROKER, MQTT_PORT, 60)
+
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 减少延迟
+
+prev_time = 0
+frame_interval = 1.0 / TARGET_FPS
+
+# ===================== 主循环 =====================
+try:
+    while True:
+        current_time = time.time()
+        if current_time - prev_time < frame_interval:
+            ret, _ = cap.read()
+            if not ret:
+                break
+            continue
+
+        prev_time = current_time
+
+        # 读取 + 缩小分辨率
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_resized = cv2.resize(frame, TARGET_RESOLUTION)
+
+        # YOLO推理
+        results = model(frame_resized, conf=CONF_THRESHOLD)
+        result = results[0]
+        annotated = result.plot()
+
+        # 组装检测结果（只发数据，不发图）
+        detection_results = {
+            "timestamp": round(current_time, 2),
+            "resolution": TARGET_RESOLUTION,
+            "detections": []
+        }
+
+        for box in result.boxes:
+            cls_id = int(box.cls[0])
+            cls_name = model.names[cls_id]
+            confidence = float(box.conf[0])
+            x1, y1, x2, y2 = map(float, box.xyxy[0])
+
+            detection_results["detections"].append({
+                "class_id": cls_id,
+                "class_name": cls_name,
+                "confidence": round(confidence, 3),
+                "bbox": [x1, y1, x2, y2],
+                "bbox_normalized": [
+                    x1 / TARGET_RESOLUTION[0],
+                    y1 / TARGET_RESOLUTION[1],
+                    x2 / TARGET_RESOLUTION[0],
+                    y2 / TARGET_RESOLUTION[1]
+                ]
+            })
+
+        # ----------------- 发送检测结果（必发）-----------------
+        client.publish(
+            MQTT_TOPIC_RESULT,
+            json.dumps(detection_results, ensure_ascii=False)
+        )
+
+        # ----------------- 只有检测到目标，才发图（你要的功能）-----------------
+        if len(detection_results["detections"]) > 0:
+            success, buffer = cv2.imencode(
+                ".jpg",
+                annotated,
+                [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+            )
+            if success:
+                client.publish(MQTT_TOPIC_IMAGE, buffer.tobytes())
+
+        # 本地显示
+        cv2.imshow("YOLO Optimized Publisher", annotated)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+    client.disconnect()
+    print("程序安全退出")

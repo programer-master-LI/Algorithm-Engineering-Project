@@ -1,0 +1,73 @@
+import cv2
+import paho.mqtt.client as mqtt
+import json
+import numpy as np
+
+# MQTT 配置（和发布端保持一致）
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+TOPIC_RESULT = "yolo/detection_results"
+TOPIC_IMAGE = "yolo/triggered_image"
+
+# 全局变量，用于存放最新图片
+latest_img = None
+
+# 回调：接收检测结果（JSON数据）
+def on_message_result(client, userdata, msg):
+    try:
+        data = json.loads(msg.payload.decode("utf-8"))
+        print("=" * 50)
+        print(f"时间戳: {data['timestamp']}")
+        print(f"画面分辨率: {data['resolution']}")
+        if len(data["detections"]) == 0:
+            print("暂无检测目标")
+        else:
+            for idx, det in enumerate(data["detections"]):
+                print(f"【目标{idx+1}】")
+                print(f"  类别: {det['class_name']} (ID:{det['class_id']})")
+                print(f"  置信度: {det['confidence']}")
+                print(f"  检测框坐标: {det['bbox']}")
+        print("=" * 50 + "\n")
+    except Exception as e:
+        print("解析检测数据失败：", e)
+
+# 回调：接收图片数据流
+def on_message_image(client, userdata, msg):
+    global latest_img
+    try:
+        # 字节流转图片
+        img_array = np.frombuffer(msg.payload, dtype=np.uint8)
+        latest_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    except Exception as e:
+        print("解析图片失败：", e)
+
+# 初始化MQTT客户端
+client = mqtt.Client()
+# 绑定回调函数
+client.message_callback_add(TOPIC_RESULT, on_message_result)
+client.message_callback_add(TOPIC_IMAGE, on_message_image)
+
+# 连接并订阅主题
+client.connect(MQTT_BROKER, MQTT_PORT, 60)
+client.subscribe(TOPIC_RESULT)
+client.subscribe(TOPIC_IMAGE)
+client.loop_start()  # 后台持续监听MQTT消息
+
+print("MQTT订阅端已启动，等待数据和图片...")
+print("按 ESC 键退出程序\n")
+
+# 窗口持续显示图片
+while True:
+    if latest_img is not None:
+        cv2.imshow("Receive Image", latest_img)
+
+    # 按下ESC退出
+    key = cv2.waitKey(1) & 0xFF
+    if key == 27:
+        break
+
+# 释放资源
+client.loop_stop()
+client.disconnect()
+cv2.destroyAllWindows()
+print("订阅端已退出")
